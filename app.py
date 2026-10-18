@@ -1,32 +1,46 @@
 import streamlit as st
+import sqlite3
 import pandas as pd
 import os
-import time
-import urllib.request
 from PIL import Image
 import ezdxf
 from ezdxf.addons.drawing import RenderContext, Frontend
 from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
 import matplotlib.pyplot as plt
-from supabase import create_client, Client
 
-# --- 1. 連接 Supabase 雲端資料庫 ---
-@st.cache_resource
-def init_supabase() -> Client:
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
-    return create_client(url, key)
+# --- 1. 建立資料夾與資料庫初始化 ---
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+DB_FILE = "outsourcing.db"
 
-supabase = init_supabase()
-BUCKET_NAME = "files"
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            part_no TEXT,
+            part_name TEXT,
+            vendor TEXT,
+            process TEXT,
+            qty INTEGER,
+            status TEXT,
+            due_date TEXT,
+            gdrive_link TEXT,
+            image_path TEXT,
+            cad_path TEXT,
+            notes TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-# --- 2. 雲端 CAD (DXF) 轉圖片預覽函數 ---
-def render_dxf_from_url(dxf_url):
+init_db()
+
+# --- 2. CAD (DXF) 轉圖片預覽函數 ---
+def render_dxf(dxf_path):
     try:
-        # 先將雲端 DXF 下載到暫存區進行解析繪圖
-        temp_path = "temp_preview.dxf"
-        urllib.request.urlretrieve(dxf_url, temp_path)
-        doc = ezdxf.readfile(temp_path)
+        doc = ezdxf.readfile(dxf_path)
         msp = doc.modelspace()
         fig = plt.figure(figsize=(8, 6), dpi=150)
         ax = fig.add_axes([0, 0, 1, 1])
@@ -38,29 +52,13 @@ def render_dxf_from_url(dxf_url):
         st.error(f"CAD 解析失敗: {e}")
         return None
 
-# --- 3. 檔案上傳至雲端函數 ---
-def upload_to_cloud(file_obj, part_no):
-    if not file_obj:
-        return ""
-    ext = os.path.splitext(file_obj.name)[1].lower()
-    # 使用時間戳記命名，避免中文檔名亂碼或重複覆蓋
-    cloud_filename = f"{int(time.time())}_{ext}"
-    file_bytes = file_obj.getvalue()
-    
-    supabase.storage.from_(BUCKET_NAME).upload(
-        path=cloud_filename,
-        file=file_bytes,
-        file_options={"content-type": file_obj.type}
-    )
-    return supabase.storage.from_(BUCKET_NAME).get_public_url(cloud_filename)
+# --- 3. 網頁介面設定 ---
+st.set_page_config(page_title="委外加工追蹤系統", layout="wide")
+st.title("🏭 工業委外加工追蹤系統")
 
-# --- 4. 網頁介面設定 ---
-st.set_page_config(page_title="委外加工雲端系統", layout="wide")
-st.title("🏭 工業委外加工追蹤系統 (雲端永久版)")
+menu = st.sidebar.radio("功能選單", ["📋 工單看板與預覽", "➕ 新增委外工單", "☁️ Google雲端備份/還原"])
 
-menu = st.sidebar.radio("功能選單", ["📋 工單看板與預覽", "➕ 新增委外工單"])
-
-# --- 5. 功能一：新增委外工單 ---
+# --- 4. 功能一：新增委外工單 ---
 if menu == "➕ 新增委外工單":
     st.subheader("建立新委外加工單")
     with st.form("order_form", clear_on_submit=True):
@@ -77,41 +75,44 @@ if menu == "➕ 新增委外工單":
             notes = st.text_area("加工備註 / 注意事項")
 
         st.markdown("---")
-        st.write("📎 **上傳圖面與照片（自動永久備份至雲端）**")
-        img_file = st.file_uploader("上傳零件照片或檢驗圖 (JPG/PNG)", type=["jpg", "jpeg", "png"])
-        cad_file = st.file_uploader("上傳 CAD 圖檔 (支援 DXF 線上預覽，DWG 雲端備份下載)", type=["dxf", "dwg"])
+        st.write("📎 **連結您的 Google 雲端硬碟 或 直接上傳檔案**")
+        gdrive_link = st.text_input("🔗 Google 雲端硬碟連結 (可貼上該零件的 DWG 圖檔或資料夾共用連結)")
+        img_file = st.file_uploader("📸 直接拍照或上傳零件照片 (JPG/PNG)", type=["jpg", "jpeg", "png"])
+        cad_file = st.file_uploader("📐 上傳 CAD 圖檔線上預覽 (支援 DXF 直接畫出圖面，DWG 可暫存)", type=["dxf", "dwg"])
 
-        submitted = st.form_submit_button("☁️ 儲存至雲端")
+        submitted = st.form_submit_button("💾 儲存工單")
         if submitted:
             if not part_no or not vendor:
                 st.warning("請填寫「料號」與「委外廠商名稱」！")
             else:
-                with st.spinner("正在上傳圖檔與寫入雲端資料庫..."):
-                    img_url = upload_to_cloud(img_file, part_no)
-                    cad_url = upload_to_cloud(cad_file, part_no)
+                img_path, cad_path = "", ""
+                if img_file:
+                    img_path = os.path.join(UPLOAD_DIR, f"{part_no}_{img_file.name}")
+                    with open(img_path, "wb") as f:
+                        f.write(img_file.getbuffer())
+                if cad_file:
+                    cad_path = os.path.join(UPLOAD_DIR, f"{part_no}_{cad_file.name}")
+                    with open(cad_path, "wb") as f:
+                        f.write(cad_file.getbuffer())
 
-                    data = {
-                        "part_no": part_no,
-                        "part_name": part_name,
-                        "vendor": vendor,
-                        "process": process,
-                        "qty": qty,
-                        "status": status,
-                        "due_date": str(due_date),
-                        "image_url": img_url,
-                        "cad_url": cad_url,
-                        "notes": notes
-                    }
-                    supabase.table("orders").insert(data).execute()
-                    st.success(f"工單【{part_no} - {part_name}】已永久儲存至雲端！")
+                conn = sqlite3.connect(DB_FILE)
+                c = conn.cursor()
+                c.execute('''
+                    INSERT INTO orders (part_no, part_name, vendor, process, qty, status, due_date, gdrive_link, image_path, cad_path, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (part_no, part_name, vendor, process, qty, status, str(due_date), gdrive_link, img_path, cad_path, notes))
+                conn.commit()
+                conn.close()
+                st.success(f"✅ 工單【{part_no} - {part_name}】已成功建立！")
 
-# --- 6. 功能二：工單看板與圖面預覽 ---
+# --- 5. 功能二：工單看板與圖面預覽 ---
 elif menu == "📋 工單看板與預覽":
-    response = supabase.table("orders").select("*").order("id", desc=True).execute()
-    df = pd.DataFrame(response.data)
+    conn = sqlite3.connect(DB_FILE)
+    df = pd.read_sql_query("SELECT * FROM orders ORDER BY id DESC", conn)
+    conn.close()
 
     if df.empty:
-        st.info("目前雲端尚無委外工單，請從左側選單新增。")
+        st.info("目前尚無委外工單，請點選左上角「>」打開選單，選擇「➕ 新增委外工單」。")
     else:
         col_f1, col_f2 = st.columns(2)
         with col_f1:
@@ -148,30 +149,79 @@ elif menu == "📋 工單看板與預覽":
                     st.write(f"**預計交期：** {row['due_date']}")
                     st.write(f"**備註：** {row['notes']}")
 
+                    if row.get("gdrive_link"):
+                        st.link_button("📂 點擊開啟 Google 雲端硬碟圖檔/資料夾", row["gdrive_link"])
+
                     status_list = ["待發包", "加工中", "表面處理中", "待品檢", "已完工入庫", "異常處理中"]
                     curr_idx = status_list.index(row["status"]) if row["status"] in status_list else 0
                     new_status = st.selectbox("更新進度狀態", status_list, index=curr_idx)
                     
-                    if st.button("更新雲端狀態"):
-                        supabase.table("orders").update({"status": new_status}).eq("id", int(selected_id)).execute()
-                        st.success("狀態已更新！")
-                        st.rerun()
+                    col_btn1, col_btn2 = st.columns(2)
+                    with col_btn1:
+                        if st.button("🔄 更新狀態"):
+                            conn = sqlite3.connect(DB_FILE)
+                            conn.execute("UPDATE orders SET status = ? WHERE id = ?", (new_status, int(selected_id)))
+                            conn.commit()
+                            conn.close()
+                            st.success("狀態已更新！")
+                            st.rerun()
+                    with col_btn2:
+                        if st.button("🗑️ 刪除此工單"):
+                            conn = sqlite3.connect(DB_FILE)
+                            conn.execute("DELETE FROM orders WHERE id = ?", (int(selected_id),))
+                            conn.commit()
+                            conn.close()
+                            st.warning("工單已刪除！")
+                            st.rerun()
 
-                    if row.get("image_url"):
+                    if row["image_path"] and os.path.exists(row["image_path"]):
                         st.markdown("#### 📸 實體/檢驗照片")
-                        st.image(row["image_url"], use_container_width=True)
+                        st.image(Image.open(row["image_path"]), use_container_width=True)
 
                 with c2:
-                    st.markdown("#### 📐 CAD 圖面預覽與下載")
-                    cad_url = row.get("cad_url", "")
-                    if cad_url:
-                        st.link_button("⬇️ 點擊下載原始 CAD 檔", cad_url)
-                        if cad_url.lower().endswith(".dxf"):
-                            with st.spinner("正在從雲端讀取並渲染 CAD 圖面..."):
-                                fig = render_dxf_from_url(cad_url)
+                    st.markdown("#### 📐 CAD 圖面預覽")
+                    if row["cad_path"] and os.path.exists(row["cad_path"]):
+                        with open(row["cad_path"], "rb") as f:
+                            st.download_button("⬇️ 下載 CAD 檔", data=f, file_name=os.path.basename(row["cad_path"]))
+                        
+                        if row["cad_path"].lower().endswith(".dxf"):
+                            with st.spinner("正在渲染 CAD 圖面..."):
+                                fig = render_dxf(row["cad_path"])
                                 if fig:
                                     st.pyplot(fig)
                         else:
-                            st.info("💡 此為 DWG 檔，已安全備份於雲端，可點擊上方按鈕下載。若需在手機網頁直接顯示線條預覽，上傳時請選擇 DXF 格式。")
+                            st.info("💡 DWG 檔可供下載，或建議搭配左側「Google 雲端硬碟連結」直接調閱雲端圖檔。")
                     else:
-                        st.write("未上傳 CAD 圖檔")
+                        st.write("未直接上傳 CAD 檔（若已附 Google 雲端連結，請點左側按鈕開啟）")
+
+# --- 6. 功能三：備份至手機 Google 雲端硬碟 ---
+elif menu == "☁️ Google雲端備份/還原":
+    st.subheader("☁️ 將工單資料存回您的 Google 雲端硬碟")
+    st.write("您可以隨時將所有工單匯出成 CSV (Excel 格式)，手機下載後可直接選擇**「儲存至 Google 雲端硬碟」**永久保存。")
+    
+    conn = sqlite3.connect(DB_FILE)
+    df = pd.read_sql_query("SELECT * FROM orders", conn)
+    conn.close()
+
+    if not df.empty:
+        csv_data = df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="📥 下載全部工單報表 (可存至 Google 雲端硬碟 / Excel)",
+            data=csv_data,
+            file_name="委外加工工單備份.csv",
+            mime="text/csv"
+        )
+    else:
+        st.info("目前尚無資料可供備份。")
+
+    st.markdown("---")
+    st.subheader("🔄 從 Google 雲端硬碟還原工單")
+    st.write("如果系統休眠重啟過，請從您的 Google 雲端硬碟選擇之前備份的 `委外加工工單備份.csv` 上傳即可一鍵還原：")
+    uploaded_csv = st.file_uploader("選擇備份的 CSV 檔案", type=["csv"])
+    if uploaded_csv is not None:
+        if st.button("🚀 立即還原工單資料"):
+            restore_df = pd.read_csv(uploaded_csv)
+            conn = sqlite3.connect(DB_FILE)
+            restore_df.to_sql("orders", conn, if_exists="replace", index=False)
+            conn.close()
+            st.success("✅ 所有工單資料已成功還原！")

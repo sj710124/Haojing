@@ -38,14 +38,18 @@ def init_db():
 
 init_db()
 
-# 讀取歷史不重複清單（供下拉選單自動完成使用）
-def get_history_options(column_name):
+# 讀取歷史不重複清單（供下拉選單自動完成與關鍵字搜尋使用）
+def get_history_options(column_name, default_list=None):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute(f"SELECT DISTINCT {column_name} FROM orders WHERE {column_name} IS NOT NULL AND {column_name} != '' ORDER BY {column_name}")
-    items = [row[0] for row in c.fetchall()]
+    db_items = [row[0] for row in c.fetchall()]
     conn.close()
-    return items
+    if default_list:
+        # 合併預設清單與歷史輸入過的項目，並去除重複
+        combined = list(dict.fromkeys(db_items + default_list))
+        return combined
+    return db_items
 
 # 解析多張圖片路徑（以分號 ; 區隔，並相容舊版單張路徑）
 def parse_image_paths(img_path_str):
@@ -70,19 +74,22 @@ def render_dxf(dxf_path):
         return None
 
 # --- 3. 網頁介面設定 ---
-st.set_page_config(page_title="委外加工追蹤系統 2.1", layout="wide")
+st.set_page_config(page_title="委外加工追蹤系統 2.2", layout="wide")
 st.title("🏭 工業委外加工追蹤系統")
 
 menu = st.sidebar.radio("功能選單", ["📋 工單看板與修改", "➕ 新增委外工單", "☁️ Google雲端備份/還原"])
 
-# --- 4. 功能一：新增委外工單（支援一次上傳多張照片） ---
+DEFAULT_PROCESSES = ["車床", "銑床", "CNC複合", "熱處理", "表面處理/電鍍", "雷射切割", "線切割", "研磨"]
+
+# --- 4. 功能一：新增委外工單 ---
 if menu == "➕ 新增委外工單":
     st.subheader("建立新委外加工單")
-    st.caption("💡 提示：系統會自動記憶您輸入過的料號、品名與廠商。點開選單可直接輸入關鍵字搜尋！")
+    st.caption("💡 提示：料號、品名、廠商與加工工序皆會自動記憶！點開選單可直接打關鍵字篩選，或選「➕ 手動輸入」新增。")
 
     history_part_nos = get_history_options("part_no")
     history_part_names = get_history_options("part_name")
     history_vendors = get_history_options("vendor")
+    history_processes = get_history_options("process", DEFAULT_PROCESSES)
 
     if "form_reset_key" not in st.session_state:
         st.session_state.form_reset_key = 0
@@ -97,30 +104,38 @@ if menu == "➕ 新增委外工單":
 
     col1, col2 = st.columns(2)
     with col1:
+        # 1. 料號
         p_no_choice = st.selectbox("料號 / 圖號 *(可輸入關鍵字搜尋)*", ["➕ 手動輸入新料號"] + history_part_nos, key=f"pno_sel_{rk}")
         if p_no_choice == "➕ 手動輸入新料號":
             part_no = st.text_input("請輸入新料號 *", key=f"pno_txt_{rk}")
         else:
             part_no = p_no_choice
 
+        # 2. 品名
         p_name_choice = st.selectbox("品名 / 零件名稱 *(可輸入關鍵字搜尋)*", ["➕ 手動輸入新品名"] + history_part_names, key=f"pname_sel_{rk}")
         if p_name_choice == "➕ 手動輸入新品名":
             part_name = st.text_input("請輸入新品名 *", key=f"pname_txt_{rk}")
         else:
             part_name = p_name_choice
 
+        # 3. 廠商
         vendor_choice = st.selectbox("委外廠商名稱 *(可輸入關鍵字搜尋)*", ["➕ 手動輸入新廠商"] + history_vendors, key=f"ven_sel_{rk}")
         if vendor_choice == "➕ 手動輸入新廠商":
             vendor = st.text_input("請輸入新廠商名稱 *", key=f"ven_txt_{rk}")
         else:
             vendor = vendor_choice
 
-        process = st.selectbox("加工工序", ["車床", "銑床", "CNC複合", "熱處理", "表面處理/電鍍", "雷射切割", "線切割", "研磨", "其他"], key=f"proc_{rk}")
+        # 4. 加工工序（支援關鍵字搜尋與自訂新增）
+        proc_choice = st.selectbox("加工工序 *(可輸入關鍵字搜尋或新增)*", history_processes + ["➕ 手動輸入新工序"], key=f"proc_sel_{rk}")
+        if proc_choice == "➕ 手動輸入新工序":
+            process = st.text_input("請輸入新加工工序 *(輸入過一次後系統會自動記住)*", key=f"proc_txt_{rk}")
+        else:
+            process = proc_choice
 
     with col2:
         qty = st.number_input("數量", min_value=1, value=1, key=f"qty_{rk}")
         status = st.selectbox("目前狀態", ["待發包", "加工中", "表面處理中", "待品檢", "已完工入庫", "異常處理中"], key=f"stat_{rk}")
-        due_date = st.date_input("預計交期", key=f"due_{rk}")
+        order_date = st.date_input("📅 發包日期", key=f"due_{rk}")
         notes = st.text_area("加工備註 / 注意事項", key=f"note_{rk}")
 
     st.markdown("---")
@@ -130,8 +145,8 @@ if menu == "➕ 新增委外工單":
     cad_file = st.file_uploader("📐 上傳 CAD 圖檔 (支援 DXF 預覽 / DWG 備份)", type=["dxf", "dwg"], key=f"cad_{rk}")
 
     if st.button("💾 儲存建立工單", type="primary", use_container_width=True):
-        if not part_no.strip() or not vendor.strip():
-            st.error("⚠️ 請填寫「料號」與「委外廠商名稱」！您剛才輸入的其他資料都保留著，請直接補填即可。")
+        if not part_no.strip() or not vendor.strip() or not process.strip():
+            st.error("⚠️ 請確認「料號」、「委外廠商名稱」與「加工工序」皆已填寫！您剛才輸入的其他資料都保留著，請直接補填即可。")
         else:
             saved_img_paths = []
             timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -155,10 +170,10 @@ if menu == "➕ 新增委外工單":
             c.execute('''
                 INSERT INTO orders (part_no, part_name, vendor, process, qty, status, due_date, gdrive_link, image_path, cad_path, notes)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (part_no.strip(), part_name.strip(), vendor.strip(), process, qty, status, str(due_date), gdrive_link, img_path_str, cad_path, notes))
+            ''', (part_no.strip(), part_name.strip(), vendor.strip(), process.strip(), qty, status, str(order_date), gdrive_link, img_path_str, cad_path, notes))
             conn.commit()
             conn.close()
-            st.success(f"✅ 工單【{part_no} - {part_name}】已成功建立！（共上傳 {len(saved_img_paths)} 張照片）")
+            st.success(f"✅ 工單【{part_no} - {part_name}（工序：{process}）】已成功建立！")
 
 # --- 5. 功能二：工單看板、多圖預覽與累計補傳 ---
 elif menu == "📋 工單看板與修改":
@@ -173,17 +188,31 @@ elif menu == "📋 工單看板與修改":
         with col_f1:
             status_filter = st.multiselect("依狀態篩選", df["status"].unique(), default=df["status"].unique())
         with col_f2:
-            search_kw = st.text_input("🔍 搜尋料號、品名或廠商")
+            search_kw = st.text_input("🔍 搜尋料號、品名、廠商或工序")
 
         filtered_df = df[df["status"].isin(status_filter)]
         if search_kw:
             filtered_df = filtered_df[
                 filtered_df["part_no"].str.contains(search_kw, case=False, na=False) |
                 filtered_df["part_name"].str.contains(search_kw, case=False, na=False) |
-                filtered_df["vendor"].str.contains(search_kw, case=False, na=False)
+                filtered_df["vendor"].str.contains(search_kw, case=False, na=False) |
+                filtered_df["process"].str.contains(search_kw, case=False, na=False)
             ]
 
-        st.dataframe(filtered_df[["id", "part_no", "part_name", "vendor", "process", "qty", "status", "due_date"]], use_container_width=True)
+        # 將表格顯示欄位名稱轉換為中文（due_date 顯示為 發包日期）
+        display_df = filtered_df[["id", "part_no", "part_name", "vendor", "process", "qty", "status", "due_date"]].rename(
+            columns={
+                "id": "工單ID",
+                "part_no": "料號",
+                "part_name": "品名",
+                "vendor": "委外廠商",
+                "process": "加工工序",
+                "qty": "數量",
+                "status": "目前狀態",
+                "due_date": "發包日期"
+            }
+        )
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
 
         st.markdown("---")
         st.subheader("🔍 工單詳細資訊、多圖預覽與修改")
@@ -191,7 +220,7 @@ elif menu == "📋 工單看板與修改":
             selected_id = st.selectbox(
                 "請選擇要檢視或修改的工單：",
                 filtered_df["id"].tolist(),
-                format_func=lambda x: f"工單 #{x} | 料號: {filtered_df[filtered_df['id']==x]['part_no'].values[0]} | 品名: {filtered_df[filtered_df['id']==x]['part_name'].values[0]} ({filtered_df[filtered_df['id']==x]['vendor'].values[0]})"
+                format_func=lambda x: f"工單 #{x} | 料號: {filtered_df[filtered_df['id']==x]['part_no'].values[0]} | 品名: {filtered_df[filtered_df['id']==x]['part_name'].values[0]} ({filtered_df[filtered_df['id']==x]['vendor'].values[0]} - {filtered_df[filtered_df['id']==x]['process'].values[0]})"
             )
 
             if selected_id:
@@ -202,14 +231,13 @@ elif menu == "📋 工單看板與修改":
                 with st.expander("✏️ 點此展開：修改工單內容 / 繼續追加多張照片 / 更換 CAD 檔"):
                     with st.form(f"edit_form_{selected_id}"):
                         ec1, ec2 = st.columns(2)
-                        proc_list = ["車床", "銑床", "CNC複合", "熱處理", "表面處理/電鍍", "雷射切割", "線切割", "研磨", "其他"]
                         stat_list = ["待發包", "加工中", "表面處理中", "待品檢", "已完工入庫", "異常處理中"]
 
                         with ec1:
                             new_pno = st.text_input("修改料號", value=row["part_no"])
                             new_pname = st.text_input("修改品名", value=row["part_name"])
                             new_vendor = st.text_input("修改廠商", value=row["vendor"])
-                            new_proc = st.selectbox("修改工序", proc_list, index=proc_list.index(row["process"]) if row["process"] in proc_list else 0)
+                            new_proc = st.text_input("修改加工工序 *(可直接打字修改)*", value=row["process"])
                         with ec2:
                             new_qty = st.number_input("修改數量", min_value=1, value=int(row["qty"]))
                             new_stat = st.selectbox("修改狀態", stat_list, index=stat_list.index(row["status"]) if row["status"] in stat_list else 0)
@@ -217,7 +245,7 @@ elif menu == "📋 工單看板與修改":
                                 default_date = datetime.strptime(row["due_date"], "%Y-%m-%d").date()
                             except:
                                 default_date = datetime.today().date()
-                            new_due = st.date_input("修改交期", value=default_date)
+                            new_order_date = st.date_input("修改發包日期", value=default_date)
                             new_gdrive = st.text_input("修改 Google 雲端連結", value=row["gdrive_link"] if row["gdrive_link"] else "")
 
                         new_notes = st.text_area("修改備註", value=row["notes"] if row["notes"] else "")
@@ -237,7 +265,6 @@ elif menu == "📋 工單看板與修改":
                         if st.form_submit_button("💾 儲存所有修改與新檔案", type="primary"):
                             ts = datetime.now().strftime("%Y%m%d%H%M%S")
                             
-                            # 處理多張照片追加或覆蓋
                             if new_img_files:
                                 newly_saved = []
                                 for idx, img_f in enumerate(new_img_files):
@@ -255,7 +282,6 @@ elif menu == "📋 工單看板與修改":
 
                             updated_img_path_str = ";".join(final_img_list)
 
-                            # 處理 CAD 檔案
                             updated_cad_path = row["cad_path"]
                             if new_cad_file:
                                 updated_cad_path = os.path.join(UPLOAD_DIR, f"{new_pno.strip()}_{ts}_{new_cad_file.name}")
@@ -267,7 +293,7 @@ elif menu == "📋 工單看板與修改":
                                 UPDATE orders 
                                 SET part_no=?, part_name=?, vendor=?, process=?, qty=?, status=?, due_date=?, gdrive_link=?, image_path=?, cad_path=?, notes=?
                                 WHERE id=?
-                            ''', (new_pno.strip(), new_pname.strip(), new_vendor.strip(), new_proc, new_qty, new_stat, str(new_due), new_gdrive, updated_img_path_str, updated_cad_path, new_notes, int(selected_id)))
+                            ''', (new_pno.strip(), new_pname.strip(), new_vendor.strip(), new_proc.strip(), new_qty, new_stat, str(new_order_date), new_gdrive, updated_img_path_str, updated_cad_path, new_notes, int(selected_id)))
                             conn.commit()
                             conn.close()
                             st.success("✅ 工單資料與照片已成功更新！")
@@ -278,7 +304,7 @@ elif menu == "📋 工單看板與修改":
                 with c1:
                     st.write(f"**料號：** {row['part_no']} | **品名：** {row['part_name']}")
                     st.write(f"**廠商：** {row['vendor']} | **工序：** {row['process']} | **數量：** {row['qty']}")
-                    st.write(f"**目前狀態：** `{row['status']}` | **預計交期：** {row['due_date']}")
+                    st.write(f"**目前狀態：** `{row['status']}` | **📅 發包日期：** {row['due_date']}")
                     st.write(f"**備註：** {row['notes']}")
 
                     if row.get("gdrive_link"):
@@ -294,7 +320,6 @@ elif menu == "📋 工單看板與修改":
 
                     st.markdown(f"#### 📸 實體/檢驗照片相簿 (共 {len(existing_imgs)} 張)")
                     if existing_imgs:
-                        # 兩張一排顯示照片，並提供單張刪除按鈕
                         img_cols = st.columns(2)
                         for idx, img_p in enumerate(existing_imgs):
                             with img_cols[idx % 2]:

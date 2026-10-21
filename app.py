@@ -2,6 +2,8 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 import os
+import io
+import base64
 from datetime import datetime
 from PIL import Image
 import ezdxf
@@ -43,6 +45,40 @@ def safe_str(val):
     s = str(val).strip()
     return "" if s.lower() == "nan" else s
 
+# 將上傳的照片壓縮並直接轉成文字碼存入資料庫（永久防遺失！）
+def encode_image_to_b64(file_obj):
+    try:
+        img = Image.open(file_obj)
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        img.thumbnail((1200, 1200))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=80)
+        b64_str = base64.b64encode(buf.getvalue()).decode("utf-8")
+        return f"data:image/jpeg;base64,{b64_str}"
+    except Exception:
+        return ""
+
+# 讀取照片清單（同時相容新版資料庫內嵌照片與舊版路徑）
+def parse_images(img_str):
+    s = safe_str(img_str)
+    if not s:
+        return []
+    items = [p.strip() for p in s.split("|") if p.strip()]
+    valid_items = []
+    for item in items:
+        if item.startswith("data:image"):
+            valid_items.append(item)
+        elif os.path.exists(item):
+            valid_items.append(item)
+    return valid_items
+
+def display_stored_image(img_item):
+    if img_item.startswith("data:image"):
+        b64_data = img_item.split(",", 1)[1]
+        return Image.open(io.BytesIO(base64.b64decode(b64_data)))
+    return Image.open(img_item)
+
 def get_history_options(col_name, default_list=None):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -53,13 +89,6 @@ def get_history_options(col_name, default_list=None):
     if default_list:
         return list(dict.fromkeys(db_items + default_list))
     return db_items
-
-def parse_image_paths(img_path_str):
-    s = safe_str(img_path_str)
-    if not s:
-        return []
-    paths = [p.strip() for p in s.split(";") if p.strip()]
-    return [p for p in paths if os.path.exists(p)]
 
 def render_dxf(dxf_path):
     try:
@@ -75,12 +104,12 @@ def render_dxf(dxf_path):
         st.error(f"CAD 解析失敗: {e}")
         return None
 
-st.set_page_config(page_title="委外加工追蹤系統", layout="wide")
+st.set_page_config(page_title="委外加工追蹤系統 3.0", layout="wide")
 st.title("🏭 工業委外加工追蹤系統")
 
 menu = st.sidebar.radio(
     "功能選單",
-    ["📋 工單看板與修改", "➕ 新增委外工單", "☁️ Google雲端備份/還原"]
+    ["📋 工單看板與修改", "➕ 新增委外工單", "☁️ 完整備份與還原 (含照片)"]
 )
 
 DEFAULT_PROCS = ["車床", "銑床", "CNC複合", "熱處理", "表面處理/電鍍", "雷射切割", "線切割", "研磨"]
@@ -88,7 +117,7 @@ STAT_LIST = ["待發包", "加工中", "表面處理中", "待品檢", "已完�
 
 if menu == "➕ 新增委外工單":
     st.subheader("建立新委外加工單")
-    st.caption("💡 料號、品名、廠商與工序皆會自動記憶，點選單可打關鍵字搜尋！")
+    st.caption("💡 照片現在會直接寫入資料庫內嵌保護！建立幾筆後，請記得去左側選單下載完整備份檔存進 Google 雲端。")
 
     hist_pnos = get_history_options("part_no")
     hist_pnames = get_history_options("part_name")
@@ -127,26 +156,25 @@ if menu == "➕ 新增委外工單":
         notes = st.text_area("加工備註 / 注意事項", key=f"note_{rk}")
 
     st.markdown("---")
-    st.write("📎 **上傳圖面與多張照片（可一次選多張，也可建單後陸續補拍追加）**")
-    gdrive_link = st.text_input("🔗 Google 雲端硬碟連結 (選填)", key=f"gd_{rk}")
+    st.write("📎 **上傳圖面與多張照片（照片將自動嵌入資料庫，備份時不會遺失）**")
+    gdrive_link = st.text_input("🔗 Google 雲端硬碟連結 (選填，建議放大型 DWG 圖檔連結)", key=f"gd_{rk}")
     img_files = st.file_uploader("📸 拍照或上傳照片 (可選多張 JPG/PNG)", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key=f"img_{rk}")
-    cad_file = st.file_uploader("📐 上傳 CAD 圖檔 (DXF 預覽 / DWG 備份)", type=["dxf", "dwg"], key=f"cad_{rk}")
+    cad_file = st.file_uploader("📐 上傳 CAD 圖檔 (DXF 線上預覽)", type=["dxf", "dwg"], key=f"cad_{rk}")
 
     if st.button("💾 儲存建立工單", type="primary", use_container_width=True):
         if not part_no.strip() or not vendor.strip() or not process.strip():
             st.error("⚠️ 請確認「料號」、「委外廠商名稱」與「加工工序」皆已填寫！")
         else:
-            saved_imgs = []
-            ts = datetime.now().strftime("%Y%m%d%H%M%S")
+            encoded_imgs = []
             if img_files:
-                for idx, img_f in enumerate(img_files):
-                    p = os.path.join(UPLOAD_DIR, f"{part_no.strip()}_{ts}_{idx}_{img_f.name}")
-                    with open(p, "wb") as f:
-                        f.write(img_f.getbuffer())
-                    saved_imgs.append(p)
-            img_path_str = ";".join(saved_imgs)
+                for img_f in img_files:
+                    b64_img = encode_image_to_b64(img_f)
+                    if b64_img:
+                        encoded_imgs.append(b64_img)
+            img_data_str = "|".join(encoded_imgs)
 
             cad_path = ""
+            ts = datetime.now().strftime("%Y%m%d%H%M%S")
             if cad_file:
                 cad_path = os.path.join(UPLOAD_DIR, f"{part_no.strip()}_{ts}_{cad_file.name}")
                 with open(cad_path, "wb") as f:
@@ -157,10 +185,10 @@ if menu == "➕ 新增委外工單":
             c.execute('''
                 INSERT INTO orders (part_no, part_name, vendor, process, qty, status, due_date, gdrive_link, image_path, cad_path, notes)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (part_no.strip(), part_name.strip(), vendor.strip(), process.strip(), qty, status, str(order_date), gdrive_link.strip(), img_path_str, cad_path, notes.strip()))
+            ''', (part_no.strip(), part_name.strip(), vendor.strip(), process.strip(), qty, status, str(order_date), gdrive_link.strip(), img_data_str, cad_path, notes.strip()))
             conn.commit()
             conn.close()
-            st.success(f"✅ 工單【{part_no} - {part_name}（工序：{process}）】已成功建立！")
+            st.success(f"✅ 工單【{part_no} - {part_name}】已建立！（含 {len(encoded_imgs)} 張內嵌照片）")
 
 elif menu == "📋 工單看板與修改":
     conn = sqlite3.connect(DB_FILE)
@@ -168,7 +196,7 @@ elif menu == "📋 工單看板與修改":
     conn.close()
 
     if df.empty:
-        st.info("目前尚無委外工單，請從左側選單選擇「➕ 新增委外工單」。")
+        st.info("目前尚無委外工單，請從左側選單選擇「➕ 新增委外工單」或至備份區還原資料。")
     else:
         col_f1, col_f2 = st.columns(2)
         with col_f1:
@@ -205,7 +233,7 @@ elif menu == "📋 工單看板與修改":
 
             if selected_id:
                 row = filtered_df[filtered_df["id"] == selected_id].iloc[0]
-                existing_imgs = parse_image_paths(row.get("image_path"))
+                existing_imgs = parse_images(row.get("image_path"))
                 cad_path_val = safe_str(row.get("cad_path"))
                 gdrive_val = safe_str(row.get("gdrive_link"))
                 notes_val = safe_str(row.get("notes"))
@@ -226,7 +254,7 @@ elif menu == "📋 工單看板與修改":
                             new_stat = st.selectbox("修改狀態", STAT_LIST, index=st_idx)
                             try:
                                 def_date = datetime.strptime(safe_str(row.get("due_date")), "%Y-%m-%d").date()
-                            except:
+                            except Exception:
                                 def_date = datetime.today().date()
                             new_order_date = st.date_input("修改發包日期", value=def_date)
                             new_gdrive = st.text_input("修改 Google 雲端連結", value=gdrive_val)
@@ -239,20 +267,16 @@ elif menu == "📋 工單看板與修改":
                         new_cad_file = st.file_uploader("選擇新 CAD 圖檔 (DXF/DWG)", type=["dxf", "dwg"])
 
                         if st.form_submit_button("💾 儲存所有修改與新檔案", type="primary"):
-                            ts = datetime.now().strftime("%Y%m%d%H%M%S")
                             if new_img_files:
-                                newly_saved = []
-                                for idx, img_f in enumerate(new_img_files):
-                                    p = os.path.join(UPLOAD_DIR, f"{new_pno.strip()}_{ts}_{idx}_{img_f.name}")
-                                    with open(p, "wb") as f:
-                                        f.write(img_f.getbuffer())
-                                    newly_saved.append(p)
-                                final_imgs = existing_imgs + newly_saved if "追加" in photo_mode else newly_saved
+                                newly_encoded = [encode_image_to_b64(f) for f in new_img_files]
+                                newly_encoded = [x for x in newly_encoded if x]
+                                final_imgs = existing_imgs + newly_encoded if "追加" in photo_mode else newly_encoded
                             else:
                                 final_imgs = existing_imgs
 
-                            updated_img_str = ";".join(final_imgs)
+                            updated_img_str = "|".join(final_imgs)
                             updated_cad = cad_path_val
+                            ts = datetime.now().strftime("%Y%m%d%H%M%S")
                             if new_cad_file:
                                 updated_cad = os.path.join(UPLOAD_DIR, f"{new_pno.strip()}_{ts}_{new_cad_file.name}")
                                 with open(updated_cad, "wb") as f:
@@ -266,7 +290,7 @@ elif menu == "📋 工單看板與修改":
                             ''', (new_pno.strip(), new_pname.strip(), new_vendor.strip(), new_proc.strip(), new_qty, new_stat, str(new_order_date), new_gdrive.strip(), updated_img_str, updated_cad, new_notes.strip(), int(selected_id)))
                             conn.commit()
                             conn.close()
-                            st.success("✅ 工單已更新！")
+                            st.success("✅ 工單與照片已更新！")
                             st.rerun()
 
                 c1, c2 = st.columns([1, 1])
@@ -289,18 +313,18 @@ elif menu == "📋 工單看板與修改":
                     st.markdown(f"#### 📸 照片相簿 (共 {len(existing_imgs)} 張)")
                     if existing_imgs:
                         img_cols = st.columns(2)
-                        for idx, img_p in enumerate(existing_imgs):
+                        for idx, img_item in enumerate(existing_imgs):
                             with img_cols[idx % 2]:
-                                st.image(Image.open(img_p), caption=f"照片 #{idx+1}", use_container_width=True)
+                                st.image(display_stored_image(img_item), caption=f"照片 #{idx+1}", use_container_width=True)
                                 if st.button(f"❌ 刪除照片 #{idx+1}", key=f"del_img_{selected_id}_{idx}"):
                                     rem = [p for i, p in enumerate(existing_imgs) if i != idx]
                                     conn = sqlite3.connect(DB_FILE)
-                                    conn.execute("UPDATE orders SET image_path=? WHERE id=?", (";".join(rem), int(selected_id)))
+                                    conn.execute("UPDATE orders SET image_path=? WHERE id=?", ("|".join(rem), int(selected_id)))
                                     conn.commit()
                                     conn.close()
                                     st.rerun()
                     else:
-                        st.caption("尚未上傳照片")
+                        st.caption("尚未上傳照片（可點上方「✏️ 修改工單內容」補傳）")
 
                 with c2:
                     st.markdown("#### 📐 CAD 圖面預覽")
@@ -317,25 +341,39 @@ elif menu == "📋 工單看板與修改":
                     else:
                         st.caption("尚未上傳 CAD 檔")
 
-elif menu == "☁️ Google雲端備份/還原":
-    st.subheader("☁️ 將工單資料存回 Google 雲端硬碟")
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT * FROM orders", conn)
-    conn.close()
+elif menu == "☁️ 完整備份與還原 (含照片)":
+    st.subheader("📦 一鍵打包備份（包含所有工單文字 + 全部照片）")
+    st.write("請定期點擊下方按鈕，將**包含所有照片的完整資料庫檔案 (`.db`)** 下載並存進您的手機或 **Google 雲端硬碟**。這樣就算網站更新或休眠重啟，照片也永遠不會不見！")
 
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "rb") as f:
+            st.download_button(
+                label="📥 下載完整系統備份檔 (含全部工單與照片 .db)",
+                data=f,
+                file_name=f"委外加工完整備份_{datetime.now().strftime('%Y%m%d')}.db",
+                mime="application/octet-stream",
+                type="primary"
+            )
+
+    conn = sqlite3.connect(DB_FILE)
+    df = pd.read_sql_query("SELECT id, part_no, part_name, vendor, process, qty, status, due_date, gdrive_link, notes FROM orders", conn)
+    conn.close()
     if not df.empty:
         csv_data = df.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("📥 下載全部工單報表 (CSV)", data=csv_data, file_name="委外加工工單備份.csv", mime="text/csv")
-    else:
-        st.info("目前尚無資料可供備份。")
+        st.download_button("📊 僅下載 Excel 對帳文字報表 (.csv 不含照片)", data=csv_data, file_name="委外加工文字報表.csv", mime="text/csv")
 
     st.markdown("---")
-    st.subheader("🔄 從 Google 雲端硬碟還原工單")
-    uploaded_csv = st.file_uploader("選擇備份的 CSV 檔案", type=["csv"])
-    if uploaded_csv is not None:
-        if st.button("🚀 立即還原工單資料"):
-            restore_df = pd.read_csv(uploaded_csv).fillna("")
-            conn = sqlite3.connect(DB_FILE)
-            restore_df.to_sql("orders", conn, if_exists="replace", index=False)
-            conn.close()
-            st.success("✅ 所有工單資料已成功還原！")
+    st.subheader("🔄 從備份檔一鍵還原（照片與工單同時恢復）")
+    uploaded_backup = st.file_uploader("請選擇之前下載的 `.db` 完整備份檔（或舊版 `.csv` 檔）", type=["db", "csv"])
+    if uploaded_backup is not None:
+        if st.button("🚀 立即還原所有資料與照片"):
+            if uploaded_backup.name.endswith(".db"):
+                with open(DB_FILE, "wb") as f:
+                    f.write(uploaded_backup.getbuffer())
+                st.success("✅ 完整資料庫（含所有工單與照片）已 100% 還原成功！請切換回「📋 工單看板與修改」檢視。")
+            else:
+                restore_df = pd.read_csv(uploaded_backup).fillna("")
+                conn = sqlite3.connect(DB_FILE)
+                restore_df.to_sql("orders", conn, if_exists="replace", index=False)
+                conn.close()
+                st.success("✅ CSV 文字工單已還原成功！")

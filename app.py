@@ -14,6 +14,28 @@ import matplotlib.pyplot as plt
 API_URL = st.secrets.get("GSHEET_API_URL", "")
 COLUMNS = ["id", "part_no", "part_name", "vendor", "process", "qty", "status", "due_date", "gdrive_link", "image_path", "notes"]
 
+def clean_id(val):
+    if val is None or pd.isna(val):
+        return ""
+    s = str(val).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+def clean_date_str(val):
+    s = safe_str(val)
+    if not s:
+        return ""
+    if "T" in s:
+        s = s.split("T")[0]
+    return s[:10]
+
+def safe_str(val):
+    if val is None or pd.isna(val):
+        return ""
+    s = str(val).strip()
+    return "" if s.lower() == "nan" else s
+
 def load_data():
     if not API_URL:
         return pd.DataFrame(columns=COLUMNS)
@@ -28,8 +50,11 @@ def load_data():
         for col in COLUMNS:
             if col not in df.columns:
                 df[col] = ""
-        # 移除完全為空的空白列
-        df = df[df["part_no"].astype(str).str.strip() != ""]
+        # 移除空白列
+        df = df[df["part_no"].astype(str).str.strip() != ""].copy()
+        # 統一將 id 轉為乾淨字串（例如 "1.0" -> "1"）
+        df["id"] = df["id"].apply(clean_id)
+        df["due_date"] = df["due_date"].apply(clean_date_str)
         return df[COLUMNS].fillna("")
     except Exception as e:
         st.error(f"讀取 Google 試算表失敗: {e}")
@@ -41,8 +66,9 @@ def save_data(df):
         return False
     try:
         df_clean = df[COLUMNS].copy().fillna("")
-        df_clean["id"] = df_clean["id"].astype(str)
+        df_clean["id"] = df_clean["id"].apply(clean_id)
         df_clean["qty"] = df_clean["qty"].astype(str)
+        df_clean["due_date"] = df_clean["due_date"].apply(clean_date_str)
         
         all_data = [COLUMNS] + df_clean.values.tolist()
         payload = {
@@ -55,12 +81,6 @@ def save_data(df):
     except Exception as e:
         st.error(f"寫入 Google 試算表失敗: {e}")
         return False
-
-def safe_str(val):
-    if val is None or pd.isna(val):
-        return ""
-    s = str(val).strip()
-    return "" if s.lower() == "nan" else s
 
 def encode_image_to_b64(file_obj):
     try:
@@ -162,11 +182,10 @@ if menu == "➕ 新增委外工單":
                             encoded_imgs.append(b64_img)
                 img_data_str = "|".join(encoded_imgs)
 
-                # 防呆計算新工單 ID（徹底防止空表或 NaN 造成崩潰）
                 if df.empty or "id" not in df.columns:
                     new_id_num = 1
                 else:
-                    valid_ids = pd.to_numeric(df["id"], errors="coerce").dropna()
+                    valid_ids = pd.to_numeric(df["id"].apply(clean_id), errors="coerce").dropna()
                     new_id_num = int(valid_ids.max()) + 1 if not valid_ids.empty else 1
 
                 new_row = {
@@ -198,7 +217,7 @@ elif menu == "📋 工單看板與修改":
         with col_f2:
             search_kw = st.text_input("🔍 搜尋料號、品名、廠商或工序")
 
-        filtered_df = df[df["status"].isin(status_filter)]
+        filtered_df = df[df["status"].isin(status_filter)].copy()
         if search_kw:
             m1 = filtered_df["part_no"].astype(str).str.contains(search_kw, case=False, na=False)
             m2 = filtered_df["part_name"].astype(str).str.contains(search_kw, case=False, na=False)
@@ -218,17 +237,20 @@ elif menu == "📋 工單看板與修改":
         st.markdown("---")
         st.subheader("🔍 工單詳細資訊與修改")
         if not filtered_df.empty:
-            def fmt_order(x):
-                match_rows = filtered_df[filtered_df["id"] == str(x)]
-                if match_rows.empty:
-                    return f"工單 #{x}"
-                r = match_rows.iloc[0]
-                return f"工單 #{x} | 料號: {safe_str(r.get('part_no'))} | 品名: {safe_str(r.get('part_name'))} ({safe_str(r.get('vendor'))})"
+            id_list = [clean_id(x) for x in filtered_df["id"].tolist() if clean_id(x)]
+            
+            def fmt_order(x_id):
+                matched = filtered_df[filtered_df["id"].apply(clean_id) == str(x_id)]
+                if matched.empty:
+                    return f"工單 #{x_id}"
+                r = matched.iloc[0]
+                return f"工單 #{x_id} | 料號: {safe_str(r.get('part_no'))} | 品名: {safe_str(r.get('part_name'))} ({safe_str(r.get('vendor'))})"
 
-            selected_id = st.selectbox("請選擇要檢視或修改的工單：", filtered_df["id"].tolist(), format_func=fmt_order)
+            selected_id = st.selectbox("請選擇要檢視或修改的工單：", id_list, format_func=fmt_order)
 
-            if selected_id:
-                row = filtered_df[filtered_df["id"] == str(selected_id)].iloc[0]
+            matched_rows = filtered_df[filtered_df["id"].apply(clean_id) == str(selected_id)]
+            if not matched_rows.empty:
+                row = matched_rows.iloc[0]
                 existing_imgs = parse_images(row.get("image_path"))
                 gdrive_val = safe_str(row.get("gdrive_link"))
                 notes_val = safe_str(row.get("notes"))
@@ -249,7 +271,8 @@ elif menu == "📋 工單看板與修改":
                             st_idx = STAT_LIST.index(curr_st) if curr_st in STAT_LIST else 0
                             new_stat = st.selectbox("修改狀態", STAT_LIST, index=st_idx)
                             try:
-                                def_date = datetime.strptime(safe_str(row.get("due_date")), "%Y-%m-%d").date()
+                                d_str = clean_date_str(row.get("due_date"))
+                                def_date = datetime.strptime(d_str, "%Y-%m-%d").date()
                             except Exception:
                                 def_date = datetime.today().date()
                             new_order_date = st.date_input("修改發包日期", value=def_date)
@@ -266,27 +289,29 @@ elif menu == "📋 工單看板與修改":
                                 else:
                                     final_imgs = existing_imgs
 
-                                row_idx = df[df["id"] == str(selected_id)].index[0]
-                                df.at[row_idx, "part_no"] = new_pno.strip()
-                                df.at[row_idx, "part_name"] = new_pname.strip()
-                                df.at[row_idx, "vendor"] = new_vendor.strip()
-                                df.at[row_idx, "process"] = new_proc.strip()
-                                df.at[row_idx, "qty"] = str(new_qty)
-                                df.at[row_idx, "status"] = new_stat
-                                df.at[row_idx, "due_date"] = str(new_order_date)
-                                df.at[row_idx, "gdrive_link"] = new_gdrive.strip()
-                                df.at[row_idx, "image_path"] = "|".join(final_imgs)
-                                df.at[row_idx, "notes"] = new_notes.strip()
+                                target_idx = df[df["id"].apply(clean_id) == str(selected_id)].index
+                                if not target_idx.empty:
+                                    row_idx = target_idx[0]
+                                    df.at[row_idx, "part_no"] = new_pno.strip()
+                                    df.at[row_idx, "part_name"] = new_pname.strip()
+                                    df.at[row_idx, "vendor"] = new_vendor.strip()
+                                    df.at[row_idx, "process"] = new_proc.strip()
+                                    df.at[row_idx, "qty"] = str(new_qty)
+                                    df.at[row_idx, "status"] = new_stat
+                                    df.at[row_idx, "due_date"] = str(new_order_date)
+                                    df.at[row_idx, "gdrive_link"] = new_gdrive.strip()
+                                    df.at[row_idx, "image_path"] = "|".join(final_imgs)
+                                    df.at[row_idx, "notes"] = new_notes.strip()
 
-                                if save_data(df):
-                                    st.success("✅ Google 雲端資料已同步更新！")
-                                    st.rerun()
+                                    if save_data(df):
+                                        st.success("✅ Google 雲端資料已同步更新！")
+                                        st.rerun()
 
                 c1, c2 = st.columns([1, 1])
                 with c1:
                     st.write(f"**料號：** {safe_str(row.get('part_no'))} | **品名：** {safe_str(row.get('part_name'))}")
                     st.write(f"**廠商：** {safe_str(row.get('vendor'))} | **工序：** {safe_str(row.get('process'))} | **數量：** {row.get('qty')}")
-                    st.write(f"**目前狀態：** `{safe_str(row.get('status'))}` | **📅 發包日期：** {safe_str(row.get('due_date'))}")
+                    st.write(f"**目前狀態：** `{safe_str(row.get('status'))}` | **📅 發包日期：** {clean_date_str(row.get('due_date'))}")
                     st.write(f"**備註：** {notes_val if notes_val else '無'}")
 
                     if gdrive_val:
@@ -294,7 +319,7 @@ elif menu == "📋 工單看板與修改":
 
                     if st.button("🗑️ 刪除此工單"):
                         with st.spinner("正在從 Google 試算表刪除..."):
-                            df = df[df["id"] != str(selected_id)]
+                            df = df[df["id"].apply(clean_id) != str(selected_id)]
                             if save_data(df):
                                 st.warning("工單已刪除！")
                                 st.rerun()

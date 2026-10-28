@@ -18,16 +18,18 @@ def load_data():
     if not API_URL:
         return pd.DataFrame(columns=COLUMNS)
     try:
-        resp = requests.get(API_URL, timeout=10)
+        resp = requests.get(API_URL, timeout=15, allow_redirects=True)
         data = resp.json()
         if len(data) <= 1:
             return pd.DataFrame(columns=COLUMNS)
-        headers = data[0]
+        headers = [str(h).strip() for h in data[0]]
         rows = data[1:]
         df = pd.DataFrame(rows, columns=headers)
         for col in COLUMNS:
             if col not in df.columns:
                 df[col] = ""
+        # 移除完全為空的空白列
+        df = df[df["part_no"].astype(str).str.strip() != ""]
         return df[COLUMNS].fillna("")
     except Exception as e:
         st.error(f"讀取 Google 試算表失敗: {e}")
@@ -47,7 +49,7 @@ def save_data(df):
             "action": "update_all",
             "data": all_data
         }
-        resp = requests.post(API_URL, json=payload, timeout=20)
+        resp = requests.post(API_URL, json=payload, timeout=25, allow_redirects=True)
         res_json = resp.json()
         return res_json.get("status") == "success"
     except Exception as e:
@@ -160,9 +162,15 @@ if menu == "➕ 新增委外工單":
                             encoded_imgs.append(b64_img)
                 img_data_str = "|".join(encoded_imgs)
 
-                new_id = 1 if df.empty else (pd.to_numeric(df["id"], errors="coerce").max() + 1)
+                # 防呆計算新工單 ID（徹底防止空表或 NaN 造成崩潰）
+                if df.empty or "id" not in df.columns:
+                    new_id_num = 1
+                else:
+                    valid_ids = pd.to_numeric(df["id"], errors="coerce").dropna()
+                    new_id_num = int(valid_ids.max()) + 1 if not valid_ids.empty else 1
+
                 new_row = {
-                    "id": str(int(new_id)),
+                    "id": str(new_id_num),
                     "part_no": part_no.strip(),
                     "part_name": part_name.strip(),
                     "vendor": vendor.strip(),
@@ -211,7 +219,10 @@ elif menu == "📋 工單看板與修改":
         st.subheader("🔍 工單詳細資訊與修改")
         if not filtered_df.empty:
             def fmt_order(x):
-                r = filtered_df[filtered_df["id"] == str(x)].iloc[0]
+                match_rows = filtered_df[filtered_df["id"] == str(x)]
+                if match_rows.empty:
+                    return f"工單 #{x}"
+                r = match_rows.iloc[0]
                 return f"工單 #{x} | 料號: {safe_str(r.get('part_no'))} | 品名: {safe_str(r.get('part_name'))} ({safe_str(r.get('vendor'))})"
 
             selected_id = st.selectbox("請選擇要檢視或修改的工單：", filtered_df["id"].tolist(), format_func=fmt_order)

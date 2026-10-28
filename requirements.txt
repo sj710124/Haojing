@@ -3,4 +3,4 @@ pandas
 pillow
 ezdxf
 matplotlib
-supabase
+st-gsheets-connection

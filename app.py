@@ -3,27 +3,56 @@ import pandas as pd
 import os
 import io
 import base64
+import requests
 from datetime import datetime
 from PIL import Image
 import ezdxf
 from ezdxf.addons.drawing import RenderContext, Frontend
 from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
 import matplotlib.pyplot as plt
-from streamlit_gsheets import GSheetsConnection
 
-# --- 1. 連線 Google 雲端試算表 ---
-conn = st.connection("gsheets", type=GSheetsConnection)
+API_URL = st.secrets.get("GSHEET_API_URL", "")
+COLUMNS = ["id", "part_no", "part_name", "vendor", "process", "qty", "status", "due_date", "gdrive_link", "image_path", "notes"]
 
 def load_data():
+    if not API_URL:
+        return pd.DataFrame(columns=COLUMNS)
     try:
-        df = conn.read(ttl="0s")
-        return df.fillna("")
-    except Exception:
-        cols = ["id", "part_no", "part_name", "vendor", "process", "qty", "status", "due_date", "gdrive_link", "image_path", "notes"]
-        return pd.DataFrame(columns=cols)
+        resp = requests.get(API_URL, timeout=10)
+        data = resp.json()
+        if len(data) <= 1:
+            return pd.DataFrame(columns=COLUMNS)
+        headers = data[0]
+        rows = data[1:]
+        df = pd.DataFrame(rows, columns=headers)
+        for col in COLUMNS:
+            if col not in df.columns:
+                df[col] = ""
+        return df[COLUMNS].fillna("")
+    except Exception as e:
+        st.error(f"讀取 Google 試算表失敗: {e}")
+        return pd.DataFrame(columns=COLUMNS)
 
 def save_data(df):
-    conn.update(data=df)
+    if not API_URL:
+        st.error("尚未設定 GSHEET_API_URL！請檢查 Streamlit Secrets。")
+        return False
+    try:
+        df_clean = df[COLUMNS].copy().fillna("")
+        df_clean["id"] = df_clean["id"].astype(str)
+        df_clean["qty"] = df_clean["qty"].astype(str)
+        
+        all_data = [COLUMNS] + df_clean.values.tolist()
+        payload = {
+            "action": "update_all",
+            "data": all_data
+        }
+        resp = requests.post(API_URL, json=payload, timeout=20)
+        res_json = resp.json()
+        return res_json.get("status") == "success"
+    except Exception as e:
+        st.error(f"寫入 Google 試算表失敗: {e}")
+        return False
 
 def safe_str(val):
     if val is None or pd.isna(val):
@@ -63,7 +92,7 @@ def get_history_options(df, col_name, default_list=None):
         return list(dict.fromkeys(db_items + default_list))
     return db_items
 
-st.set_page_config(page_title="委外加工追蹤系統 (Google雲端版)", layout="wide")
+st.set_page_config(page_title="委外加工追蹤系統", layout="wide")
 st.title("🏭 工業委外加工追蹤系統 (Google 雲端版)")
 
 menu = st.sidebar.radio("功能選單", ["📋 工單看板與修改", "➕ 新增委外工單"])
@@ -75,7 +104,7 @@ df = load_data()
 
 if menu == "➕ 新增委外工單":
     st.subheader("建立新委外加工單")
-    st.caption("☁️ 所有工單將自動即時存入您的 Google 雲端試算表，永不遺失！")
+    st.caption("☁️ 工單直接同步至 Google 雲端試算表，隨時自動保存。")
 
     hist_pnos = get_history_options(df, "part_no")
     hist_pnames = get_history_options(df, "part_name")
@@ -122,7 +151,7 @@ if menu == "➕ 新增委外工單":
         if not part_no.strip() or not vendor.strip() or not process.strip():
             st.error("⚠️ 請確認「料號」、「委外廠商名稱」與「加工工序」皆已填寫！")
         else:
-            with st.spinner("正在將資料寫入 Google 雲端試算表..."):
+            with st.spinner("正在將工單寫入 Google 雲端試算表..."):
                 encoded_imgs = []
                 if img_files:
                     for img_f in img_files:
@@ -133,12 +162,12 @@ if menu == "➕ 新增委外工單":
 
                 new_id = 1 if df.empty else (pd.to_numeric(df["id"], errors="coerce").max() + 1)
                 new_row = {
-                    "id": new_id,
+                    "id": str(int(new_id)),
                     "part_no": part_no.strip(),
                     "part_name": part_name.strip(),
                     "vendor": vendor.strip(),
                     "process": process.strip(),
-                    "qty": qty,
+                    "qty": str(qty),
                     "status": status,
                     "due_date": str(order_date),
                     "gdrive_link": gdrive_link.strip(),
@@ -146,9 +175,9 @@ if menu == "➕ 新增委外工單":
                     "notes": notes.strip()
                 }
                 updated_df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                save_data(updated_df)
-                st.success(f"✅ 工單【{part_no} - {part_name}】已成功同步至 Google 雲端！")
-                st.rerun()
+                if save_data(updated_df):
+                    st.success(f"✅ 工單【{part_no} - {part_name}】已成功同步至 Google 雲端！")
+                    st.rerun()
 
 elif menu == "📋 工單看板與修改":
     if df.empty:
@@ -182,13 +211,13 @@ elif menu == "📋 工單看板與修改":
         st.subheader("🔍 工單詳細資訊與修改")
         if not filtered_df.empty:
             def fmt_order(x):
-                r = filtered_df[filtered_df["id"] == x].iloc[0]
+                r = filtered_df[filtered_df["id"] == str(x)].iloc[0]
                 return f"工單 #{x} | 料號: {safe_str(r.get('part_no'))} | 品名: {safe_str(r.get('part_name'))} ({safe_str(r.get('vendor'))})"
 
             selected_id = st.selectbox("請選擇要檢視或修改的工單：", filtered_df["id"].tolist(), format_func=fmt_order)
 
             if selected_id:
-                row = filtered_df[filtered_df["id"] == selected_id].iloc[0]
+                row = filtered_df[filtered_df["id"] == str(selected_id)].iloc[0]
                 existing_imgs = parse_images(row.get("image_path"))
                 gdrive_val = safe_str(row.get("gdrive_link"))
                 notes_val = safe_str(row.get("notes"))
@@ -202,7 +231,8 @@ elif menu == "📋 工單看板與修改":
                             new_vendor = st.text_input("修改廠商", value=safe_str(row.get("vendor")))
                             new_proc = st.text_input("修改加工工序", value=safe_str(row.get("process")))
                         with ec2:
-                            q_val = int(row["qty"]) if pd.notna(row["qty"]) and str(row["qty"]).isdigit() else 1
+                            raw_qty = row.get("qty")
+                            q_val = int(raw_qty) if str(raw_qty).isdigit() else 1
                             new_qty = st.number_input("修改數量", min_value=1, value=q_val)
                             curr_st = safe_str(row.get("status"))
                             st_idx = STAT_LIST.index(curr_st) if curr_st in STAT_LIST else 0
@@ -225,21 +255,21 @@ elif menu == "📋 工單看板與修改":
                                 else:
                                     final_imgs = existing_imgs
 
-                                row_idx = df[df["id"] == selected_id].index[0]
+                                row_idx = df[df["id"] == str(selected_id)].index[0]
                                 df.at[row_idx, "part_no"] = new_pno.strip()
                                 df.at[row_idx, "part_name"] = new_pname.strip()
                                 df.at[row_idx, "vendor"] = new_vendor.strip()
                                 df.at[row_idx, "process"] = new_proc.strip()
-                                df.at[row_idx, "qty"] = new_qty
+                                df.at[row_idx, "qty"] = str(new_qty)
                                 df.at[row_idx, "status"] = new_stat
                                 df.at[row_idx, "due_date"] = str(new_order_date)
                                 df.at[row_idx, "gdrive_link"] = new_gdrive.strip()
                                 df.at[row_idx, "image_path"] = "|".join(final_imgs)
                                 df.at[row_idx, "notes"] = new_notes.strip()
 
-                                save_data(df)
-                                st.success("✅ Google 雲端資料已同步更新！")
-                                st.rerun()
+                                if save_data(df):
+                                    st.success("✅ Google 雲端資料已同步更新！")
+                                    st.rerun()
 
                 c1, c2 = st.columns([1, 1])
                 with c1:
@@ -253,10 +283,10 @@ elif menu == "📋 工單看板與修改":
 
                     if st.button("🗑️ 刪除此工單"):
                         with st.spinner("正在從 Google 試算表刪除..."):
-                            df = df[df["id"] != selected_id]
-                            save_data(df)
-                            st.warning("工單已刪除！")
-                            st.rerun()
+                            df = df[df["id"] != str(selected_id)]
+                            if save_data(df):
+                                st.warning("工單已刪除！")
+                                st.rerun()
 
                 with c2:
                     st.markdown(f"#### 📸 照片相簿 (共 {len(existing_imgs)} 張)")

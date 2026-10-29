@@ -50,9 +50,7 @@ def load_data():
         for col in COLUMNS:
             if col not in df.columns:
                 df[col] = ""
-        # 移除空白列
         df = df[df["part_no"].astype(str).str.strip() != ""].copy()
-        # 統一將 id 轉為乾淨字串（例如 "1.0" -> "1"）
         df["id"] = df["id"].apply(clean_id)
         df["due_date"] = df["due_date"].apply(clean_date_str)
         return df[COLUMNS].fillna("")
@@ -122,16 +120,16 @@ menu = st.sidebar.radio("功能選單", ["📋 工單看板與修改", "➕ 新�
 DEFAULT_PROCS = ["車床", "銑床", "CNC複合", "熱處理", "表面處理/電鍍", "雷射切割", "線切割", "研磨"]
 STAT_LIST = ["待發包", "加工中", "表面處理中", "待品檢", "已完工入庫", "異常處理中"]
 
-df = load_data()
+full_df = load_data()
 
 if menu == "➕ 新增委外工單":
     st.subheader("建立新委外加工單")
-    st.caption("☁️ 工單直接同步至 Google 雲端試算表，隨時自動保存。")
+    st.caption("☁️ 工單直接同步至 Google 雲端試算表，任意電腦免登入 Google 即可填寫與上傳照片。")
 
-    hist_pnos = get_history_options(df, "part_no")
-    hist_pnames = get_history_options(df, "part_name")
-    hist_vendors = get_history_options(df, "vendor")
-    hist_procs = get_history_options(df, "process", DEFAULT_PROCS)
+    hist_pnos = get_history_options(full_df, "part_no")
+    hist_pnames = get_history_options(full_df, "part_name")
+    hist_vendors = get_history_options(full_df, "vendor")
+    hist_procs = get_history_options(full_df, "process", DEFAULT_PROCS)
 
     if "form_reset_key" not in st.session_state:
         st.session_state.form_reset_key = 0
@@ -174,6 +172,7 @@ if menu == "➕ 新增委外工單":
             st.error("⚠️ 請確認「料號」、「委外廠商名稱」與「加工工序」皆已填寫！")
         else:
             with st.spinner("正在將工單寫入 Google 雲端試算表..."):
+                current_full = load_data()
                 encoded_imgs = []
                 if img_files:
                     for img_f in img_files:
@@ -182,10 +181,10 @@ if menu == "➕ 新增委外工單":
                             encoded_imgs.append(b64_img)
                 img_data_str = "|".join(encoded_imgs)
 
-                if df.empty or "id" not in df.columns:
+                if current_full.empty or "id" not in current_full.columns:
                     new_id_num = 1
                 else:
-                    valid_ids = pd.to_numeric(df["id"].apply(clean_id), errors="coerce").dropna()
+                    valid_ids = pd.to_numeric(current_full["id"].apply(clean_id), errors="coerce").dropna()
                     new_id_num = int(valid_ids.max()) + 1 if not valid_ids.empty else 1
 
                 new_row = {
@@ -201,23 +200,23 @@ if menu == "➕ 新增委外工單":
                     "image_path": img_data_str,
                     "notes": notes.strip()
                 }
-                updated_df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                updated_df = pd.concat([current_full, pd.DataFrame([new_row])], ignore_index=True)
                 if save_data(updated_df):
                     st.success(f"✅ 工單【{part_no} - {part_name}】已成功同步至 Google 雲端！")
                     st.rerun()
 
 elif menu == "📋 工單看板與修改":
-    if df.empty:
+    if full_df.empty:
         st.info("目前 Google 雲端尚無委外工單，請從左側選單選擇「➕ 新增委外工單」。")
     else:
         col_f1, col_f2 = st.columns(2)
         with col_f1:
-            valid_stats = [x for x in df["status"].unique() if safe_str(x)]
+            valid_stats = [x for x in full_df["status"].unique() if safe_str(x)]
             status_filter = st.multiselect("依狀態篩選", valid_stats, default=valid_stats)
         with col_f2:
             search_kw = st.text_input("🔍 搜尋料號、品名、廠商或工序")
 
-        filtered_df = df[df["status"].isin(status_filter)].copy()
+        filtered_df = full_df[full_df["status"].isin(status_filter)].copy()
         if search_kw:
             m1 = filtered_df["part_no"].astype(str).str.contains(search_kw, case=False, na=False)
             m2 = filtered_df["part_name"].astype(str).str.contains(search_kw, case=False, na=False)
@@ -283,28 +282,29 @@ elif menu == "📋 工單看板與修改":
 
                         if st.form_submit_button("💾 儲存修改至 Google 雲端", type="primary"):
                             with st.spinner("正在更新 Google 試算表..."):
+                                latest_full = load_data()
                                 if new_img_files:
                                     newly_encoded = [encode_image_to_b64(f) for f in new_img_files]
                                     final_imgs = existing_imgs + [x for x in newly_encoded if x]
                                 else:
                                     final_imgs = existing_imgs
 
-                                target_idx = df[df["id"].apply(clean_id) == str(selected_id)].index
+                                target_idx = latest_full[latest_full["id"].apply(clean_id) == str(selected_id)].index
                                 if not target_idx.empty:
                                     row_idx = target_idx[0]
-                                    df.at[row_idx, "part_no"] = new_pno.strip()
-                                    df.at[row_idx, "part_name"] = new_pname.strip()
-                                    df.at[row_idx, "vendor"] = new_vendor.strip()
-                                    df.at[row_idx, "process"] = new_proc.strip()
-                                    df.at[row_idx, "qty"] = str(new_qty)
-                                    df.at[row_idx, "status"] = new_stat
-                                    df.at[row_idx, "due_date"] = str(new_order_date)
-                                    df.at[row_idx, "gdrive_link"] = new_gdrive.strip()
-                                    df.at[row_idx, "image_path"] = "|".join(final_imgs)
-                                    df.at[row_idx, "notes"] = new_notes.strip()
+                                    latest_full.at[row_idx, "part_no"] = new_pno.strip()
+                                    latest_full.at[row_idx, "part_name"] = new_pname.strip()
+                                    latest_full.at[row_idx, "vendor"] = new_vendor.strip()
+                                    latest_full.at[row_idx, "process"] = new_proc.strip()
+                                    latest_full.at[row_idx, "qty"] = str(new_qty)
+                                    latest_full.at[row_idx, "status"] = new_stat
+                                    latest_full.at[row_idx, "due_date"] = str(new_order_date)
+                                    latest_full.at[row_idx, "gdrive_link"] = new_gdrive.strip()
+                                    latest_full.at[row_idx, "image_path"] = "|".join(final_imgs)
+                                    latest_full.at[row_idx, "notes"] = new_notes.strip()
 
-                                    if save_data(df):
-                                        st.success("✅ Google 雲端資料已同步更新！")
+                                    if save_data(latest_full):
+                                        st.success("✅ Google 雲端資料已同步更新！其他工單完好無損。")
                                         st.rerun()
 
                 c1, c2 = st.columns([1, 1])
@@ -319,8 +319,9 @@ elif menu == "📋 工單看板與修改":
 
                     if st.button("🗑️ 刪除此工單"):
                         with st.spinner("正在從 Google 試算表刪除..."):
-                            df = df[df["id"].apply(clean_id) != str(selected_id)]
-                            if save_data(df):
+                            latest_full = load_data()
+                            updated_after_del = latest_full[latest_full["id"].apply(clean_id) != str(selected_id)]
+                            if save_data(updated_after_del):
                                 st.warning("工單已刪除！")
                                 st.rerun()
 

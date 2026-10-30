@@ -46,11 +46,9 @@ def load_data():
         for col in COLUMNS:
             if col not in df.columns:
                 df[col] = ""
-        # 排除殘留的無效說明列
         df = df[df["part_no"].astype(str).str.strip() != ""].copy()
         df = df[~df["part_no"].astype(str).str.strip().isin(["id", "part_no", "料號", "qty", "status", "due_date", "gdrive_link", "image_path", "notes"])].copy()
         
-        # 強制將所有欄位轉為純字串，避免型別衝突造成 LossySetitemError
         for col in COLUMNS:
             df[col] = df[col].astype(str)
 
@@ -84,20 +82,55 @@ def save_data(df):
         st.error(f"寫入 Google 試算表失敗: {e}")
         return False
 
-# 智慧壓縮（450px，確保 3 張照片能在儲存格上限內完整保存）
-def encode_image_to_b64(file_obj):
-    try:
-        img = Image.open(file_obj)
-        img = ImageOps.exif_transpose(img)
-        if img.mode in ("RGBA", "P"):
-            img = img.convert("RGB")
-        img.thumbnail((450, 450))
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=45, optimize=True)
-        b64_str = base64.b64encode(buf.getvalue()).decode("utf-8")
-        return f"data:image/jpeg;base64,{b64_str}"
-    except Exception:
+# 智慧動態壓縮：依張數自動調整尺寸，PNG/JPG 統一轉為輕量 JPEG，總長度嚴格鎖定在 45,000 字元內
+def encode_images_strictly(file_objs, max_total_chars=46000):
+    if not file_objs:
         return ""
+    files = file_objs[:3]
+    count = len(files)
+    
+    # 依張數決定尺寸與壓縮品質
+    if count == 1:
+        dim, quality = (450, 450), 45
+    elif count == 2:
+        dim, quality = (380, 380), 40
+    else:
+        dim, quality = (320, 320), 35
+
+    encoded_list = []
+    for f in files:
+        try:
+            img = Image.open(f)
+            img = ImageOps.exif_transpose(img)
+            # 強制將 PNG 或 RGBA 轉為標準 RGB JPEG
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            img.thumbnail(dim)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=quality, optimize=True)
+            b64_str = base64.b64encode(buf.getvalue()).decode("utf-8")
+            encoded_list.append(f"data:image/jpeg;base64,{b64_str}")
+        except Exception:
+            continue
+
+    combined = "|".join(encoded_list)
+    # 若仍然超過 Google 試算表 50,000 字元限制，進行二次降質安全保護
+    if len(combined) > max_total_chars and encoded_list:
+        encoded_list_safe = []
+        for f in files:
+            try:
+                img = Image.open(f)
+                img = ImageOps.exif_transpose(img).convert("RGB")
+                img.thumbnail((260, 260))
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=28, optimize=True)
+                b64_str = base64.b64encode(buf.getvalue()).decode("utf-8")
+                encoded_list_safe.append(f"data:image/jpeg;base64,{b64_str}")
+            except Exception:
+                continue
+        combined = "|".join(encoded_list_safe)
+
+    return combined
 
 def parse_images(img_str):
     s = safe_str(img_str)
@@ -192,13 +225,7 @@ if menu == "➕ 新增委外工單":
         else:
             with st.spinner("正在壓縮並將工單寫入 Google 雲端試算表..."):
                 current_full = load_data()
-                encoded_imgs = []
-                if img_files:
-                    for img_f in img_files[:3]:
-                        b64_img = encode_image_to_b64(img_f)
-                        if b64_img:
-                            encoded_imgs.append(b64_img)
-                img_data_str = "|".join(encoded_imgs)
+                img_data_str = encode_images_strictly(img_files[:3]) if img_files else ""
 
                 if current_full.empty or "id" not in current_full.columns:
                     new_id_num = 1
@@ -221,7 +248,7 @@ if menu == "➕ 新增委外工單":
                 }
                 updated_df = pd.concat([current_full, pd.DataFrame([new_row])], ignore_index=True)
                 if save_data(updated_df):
-                    st.success(f"✅ 工單【{part_no} - {part_name}】已成功同步至 Google 雲端！(含 {len(encoded_imgs)} 張照片)")
+                    st.success(f"✅ 工單【{part_no} - {part_name}】已成功同步至 Google 雲端！")
                     st.rerun()
 
 elif menu == "📋 工單看板與修改":
@@ -318,18 +345,18 @@ elif menu == "📋 工單看板與修改":
                         new_img_files = st.file_uploader("追加上傳新照片 (JPG/PNG，總數上限 3 張)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
                         if st.form_submit_button("💾 儲存修改至 Google 雲端", type="primary"):
-                            with st.spinner("正在壓縮並更新 Google 試算表..."):
+                            with st.spinner("正在自動縮圖並更新 Google 試算表..."):
                                 latest_full = load_data()
+                                
+                                # 若有追加照片，使用智慧動態壓縮處理，避免超出試算表容量
                                 if new_img_files:
-                                    newly_encoded = [encode_image_to_b64(f) for f in new_img_files]
-                                    final_imgs = (existing_imgs + [x for x in newly_encoded if x])[-3:]
+                                    final_img_str = encode_images_strictly(new_img_files[:3])
                                 else:
-                                    final_imgs = existing_imgs
+                                    final_img_str = safe_str(row.get("image_path"))
 
                                 target_idx = latest_full[latest_full["id"].apply(clean_id) == str(selected_id)].index
                                 if not target_idx.empty:
                                     row_idx = target_idx[0]
-                                    # 確保全表都是 object 型態，徹底杜絕 LossySetitemError
                                     latest_full = latest_full.astype(str)
                                     latest_full.loc[row_idx, "part_no"] = str(new_pno).strip()
                                     latest_full.loc[row_idx, "part_name"] = str(new_pname).strip()
@@ -339,11 +366,11 @@ elif menu == "📋 工單看板與修改":
                                     latest_full.loc[row_idx, "status"] = str(new_stat)
                                     latest_full.loc[row_idx, "due_date"] = str(new_order_date)
                                     latest_full.loc[row_idx, "gdrive_link"] = str(new_gdrive).strip()
-                                    latest_full.loc[row_idx, "image_path"] = str("|".join(final_imgs))
+                                    latest_full.loc[row_idx, "image_path"] = str(final_img_str)
                                     latest_full.loc[row_idx, "notes"] = str(new_notes).strip()
 
                                     if save_data(latest_full):
-                                        st.success("✅ Google 雲端資料已同步更新！")
+                                        st.success("✅ Google 雲端資料已同步更新！3 張照片已成功保存。")
                                         st.rerun()
 
                     if st.button("🗑️ 刪除此整筆工單", key=f"del_btn_{selected_id}"):

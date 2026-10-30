@@ -6,10 +6,6 @@ import base64
 import requests
 from datetime import datetime
 from PIL import Image
-import ezdxf
-from ezdxf.addons.drawing import RenderContext, Frontend
-from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
-import matplotlib.pyplot as plt
 
 API_URL = st.secrets.get("GSHEET_API_URL", "")
 COLUMNS = ["id", "part_no", "part_name", "vendor", "process", "qty", "status", "due_date", "gdrive_link", "image_path", "notes"]
@@ -73,21 +69,22 @@ def save_data(df):
             "action": "update_all",
             "data": all_data
         }
-        resp = requests.post(API_URL, json=payload, timeout=25, allow_redirects=True)
+        resp = requests.post(API_URL, json=payload, timeout=30, allow_redirects=True)
         res_json = resp.json()
         return res_json.get("status") == "success"
     except Exception as e:
         st.error(f"寫入 Google 試算表失敗: {e}")
         return False
 
+# 高度壓縮照片，確保多張照片總大小在試算合格限制內
 def encode_image_to_b64(file_obj):
     try:
         img = Image.open(file_obj)
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
-        img.thumbnail((800, 800))
+        img.thumbnail((600, 600))
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=70)
+        img.save(buf, format="JPEG", quality=55, optimize=True)
         b64_str = base64.b64encode(buf.getvalue()).decode("utf-8")
         return f"data:image/jpeg;base64,{b64_str}"
     except Exception:
@@ -124,7 +121,7 @@ full_df = load_data()
 
 if menu == "➕ 新增委外工單":
     st.subheader("建立新委外加工單")
-    st.caption("☁️ 工單直接同步至 Google 雲端試算表，任意電腦免登入 Google 即可填寫與上傳照片。")
+    st.caption("☁️ 工單直接同步至 Google 雲端試算表。")
 
     hist_pnos = get_history_options(full_df, "part_no")
     hist_pnames = get_history_options(full_df, "part_name")
@@ -164,18 +161,18 @@ if menu == "➕ 新增委外工單":
 
     st.markdown("---")
     st.write("📎 **上傳圖面與照片**")
-    gdrive_link = st.text_input("🔗 Google 雲端硬碟圖檔連結 (可直接貼 DWG 檔案分享網址)", key=f"gd_{rk}")
-    img_files = st.file_uploader("📸 拍照或上傳照片 (可選多張 JPG/PNG)", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key=f"img_{rk}")
+    gdrive_link = st.text_input("🔗 Google 雲端硬碟圖檔連結 (可直接貼 DWG 檔案或大量照片資料夾網址)", key=f"gd_{rk}")
+    img_files = st.file_uploader("📸 拍照或上傳照片 (支援多張 JPG/PNG，單筆建議 4 張內)", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key=f"img_{rk}")
 
     if st.button("💾 儲存建立工單", type="primary", use_container_width=True):
         if not part_no.strip() or not vendor.strip() or not process.strip():
             st.error("⚠️ 請確認「料號」、「委外廠商名稱」與「加工工序」皆已填寫！")
         else:
-            with st.spinner("正在將工單寫入 Google 雲端試算表..."):
+            with st.spinner("正在壓縮並將工單寫入 Google 雲端試算表..."):
                 current_full = load_data()
                 encoded_imgs = []
                 if img_files:
-                    for img_f in img_files:
+                    for img_f in img_files[:4]:
                         b64_img = encode_image_to_b64(img_f)
                         if b64_img:
                             encoded_imgs.append(b64_img)
@@ -278,14 +275,14 @@ elif menu == "📋 工單看板與修改":
                             new_gdrive = st.text_input("修改 Google 雲端連結", value=gdrive_val)
 
                         new_notes = st.text_area("修改備註", value=notes_val)
-                        new_img_files = st.file_uploader("追加上傳新照片 (JPG/PNG)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+                        new_img_files = st.file_uploader("追加上傳新照片 (JPG/PNG，總計建議 4 張內)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
                         if st.form_submit_button("💾 儲存修改至 Google 雲端", type="primary"):
                             with st.spinner("正在更新 Google 試算表..."):
                                 latest_full = load_data()
                                 if new_img_files:
                                     newly_encoded = [encode_image_to_b64(f) for f in new_img_files]
-                                    final_imgs = existing_imgs + [x for x in newly_encoded if x]
+                                    final_imgs = (existing_imgs + [x for x in newly_encoded if x])[-4:]
                                 else:
                                     final_imgs = existing_imgs
 
@@ -304,7 +301,7 @@ elif menu == "📋 工單看板與修改":
                                     latest_full.at[row_idx, "notes"] = new_notes.strip()
 
                                     if save_data(latest_full):
-                                        st.success("✅ Google 雲端資料已同步更新！其他工單完好無損。")
+                                        st.success("✅ Google 雲端資料已同步更新！")
                                         st.rerun()
 
                 c1, c2 = st.columns([1, 1])

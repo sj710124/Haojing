@@ -46,7 +46,9 @@ def load_data():
         for col in COLUMNS:
             if col not in df.columns:
                 df[col] = ""
+        # 排除說明列與空列
         df = df[df["part_no"].astype(str).str.strip() != ""].copy()
+        df = df[~df["part_no"].astype(str).str.strip().isin(["id", "part_no", "料號"])].copy()
         df["id"] = df["id"].apply(clean_id)
         df["due_date"] = df["due_date"].apply(clean_date_str)
         return df[COLUMNS].fillna("")
@@ -76,30 +78,43 @@ def save_data(df):
         st.error(f"寫入 Google 試算表失敗: {e}")
         return False
 
-# 高度壓縮照片，確保多張照片總大小在試算合格限制內
 def encode_image_to_b64(file_obj):
     try:
         img = Image.open(file_obj)
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
-        img.thumbnail((600, 600))
+        img.thumbnail((700, 700))
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=55, optimize=True)
+        img.save(buf, format="JPEG", quality=60, optimize=True)
         b64_str = base64.b64encode(buf.getvalue()).decode("utf-8")
         return f"data:image/jpeg;base64,{b64_str}"
     except Exception:
         return ""
 
+# 超強相容性圖片解析（容錯各種儲存格格式）
 def parse_images(img_str):
     s = safe_str(img_str)
     if not s:
         return []
     items = [p.strip() for p in s.split("|") if p.strip()]
-    return [p for p in items if p.startswith("data:image")]
+    valid_items = []
+    for item in items:
+        if "base64," in item:
+            valid_items.append(item)
+        elif len(item) > 100:  # 純 base64 碼無前綴
+            valid_items.append(f"data:image/jpeg;base64,{item}")
+    return valid_items
 
 def display_stored_image(img_item):
-    b64_data = img_item.split(",", 1)[1]
-    return Image.open(io.BytesIO(base64.b64decode(b64_data)))
+    try:
+        if "base64," in img_item:
+            b64_data = img_item.split("base64,", 1)[1]
+        else:
+            b64_data = img_item
+        img_bytes = base64.b64decode(b64_data)
+        return Image.open(io.BytesIO(img_bytes))
+    except Exception as e:
+        return None
 
 def get_history_options(df, col_name, default_list=None):
     if df.empty or col_name not in df.columns:
@@ -121,7 +136,7 @@ full_df = load_data()
 
 if menu == "➕ 新增委外工單":
     st.subheader("建立新委外加工單")
-    st.caption("☁️ 工單直接同步至 Google 雲端試算表。")
+    st.caption("☁️ 工單直接同步至 Google 雲端試算表，照片即時保存。")
 
     hist_pnos = get_history_options(full_df, "part_no")
     hist_pnames = get_history_options(full_df, "part_name")
@@ -161,7 +176,7 @@ if menu == "➕ 新增委外工單":
 
     st.markdown("---")
     st.write("📎 **上傳圖面與照片**")
-    gdrive_link = st.text_input("🔗 Google 雲端硬碟圖檔連結 (可直接貼 DWG 檔案或大量照片資料夾網址)", key=f"gd_{rk}")
+    gdrive_link = st.text_input("🔗 Google 雲端硬碟圖檔連結 (可直接貼 DWG 檔案或大型圖面網址)", key=f"gd_{rk}")
     img_files = st.file_uploader("📸 拍照或上傳照片 (支援多張 JPG/PNG，單筆建議 4 張內)", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key=f"img_{rk}")
 
     if st.button("💾 儲存建立工單", type="primary", use_container_width=True):
@@ -231,7 +246,7 @@ elif menu == "📋 工單看板與修改":
         st.dataframe(disp_df, use_container_width=True, hide_index=True)
 
         st.markdown("---")
-        st.subheader("🔍 工單詳細資訊與修改")
+        st.subheader("🔍 工單詳細資訊、照片預覽與修改")
         if not filtered_df.empty:
             id_list = [clean_id(x) for x in filtered_df["id"].tolist() if clean_id(x)]
             
@@ -251,7 +266,28 @@ elif menu == "📋 工單看板與修改":
                 gdrive_val = safe_str(row.get("gdrive_link"))
                 notes_val = safe_str(row.get("notes"))
 
-                with st.expander("✏️ 點此展開：修改工單內容 / 追加照片"):
+                # 1. 工單文字資訊摘要
+                st.write(f"**料號：** `{safe_str(row.get('part_no'))}` | **品名：** `{safe_str(row.get('part_name'))}` | **廠商：** `{safe_str(row.get('vendor'))}`")
+                st.write(f"**工序：** `{safe_str(row.get('process'))}` | **數量：** `{row.get('qty')}` | **狀態：** `{safe_str(row.get('status'))}` | **發包日：** `{clean_date_str(row.get('due_date'))}`")
+                if notes_val:
+                    st.info(f"📝 **加工備註：** {notes_val}")
+                if gdrive_val:
+                    st.link_button("📂 開啟 Google 雲端硬碟圖檔", gdrive_val)
+
+                # 2. 照片相簿展示區（大圖清晰顯示）
+                st.markdown(f"#### 📸 照片相簿 (共 {len(existing_imgs)} 張)")
+                if existing_imgs:
+                    cols = st.columns(min(len(existing_imgs), 3))
+                    for idx, img_item in enumerate(existing_imgs):
+                        img_obj = display_stored_image(img_item)
+                        if img_obj:
+                            with cols[idx % 3]:
+                                st.image(img_obj, caption=f"照片 #{idx+1}", use_container_width=True)
+                else:
+                    st.caption("ℹ️ 目前無照片（可點下方修改展開面板補傳）")
+
+                # 3. 折疊式修改面板
+                with st.expander("✏️ 點此展開：修改工單內容 / 追加照片 / 刪除工單"):
                     with st.form(f"edit_form_{selected_id}"):
                         ec1, ec2 = st.columns(2)
                         with ec1:
@@ -275,7 +311,7 @@ elif menu == "📋 工單看板與修改":
                             new_gdrive = st.text_input("修改 Google 雲端連結", value=gdrive_val)
 
                         new_notes = st.text_area("修改備註", value=notes_val)
-                        new_img_files = st.file_uploader("追加上傳新照片 (JPG/PNG，總計建議 4 張內)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+                        new_img_files = st.file_uploader("追加上傳新照片 (JPG/PNG)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
                         if st.form_submit_button("💾 儲存修改至 Google 雲端", type="primary"):
                             with st.spinner("正在更新 Google 試算表..."):
@@ -304,30 +340,10 @@ elif menu == "📋 工單看板與修改":
                                         st.success("✅ Google 雲端資料已同步更新！")
                                         st.rerun()
 
-                c1, c2 = st.columns([1, 1])
-                with c1:
-                    st.write(f"**料號：** {safe_str(row.get('part_no'))} | **品名：** {safe_str(row.get('part_name'))}")
-                    st.write(f"**廠商：** {safe_str(row.get('vendor'))} | **工序：** {safe_str(row.get('process'))} | **數量：** {row.get('qty')}")
-                    st.write(f"**目前狀態：** `{safe_str(row.get('status'))}` | **📅 發包日期：** {clean_date_str(row.get('due_date'))}")
-                    st.write(f"**備註：** {notes_val if notes_val else '無'}")
-
-                    if gdrive_val:
-                        st.link_button("📂 開啟 Google 雲端硬碟圖檔", gdrive_val)
-
-                    if st.button("🗑️ 刪除此工單"):
+                    if st.button("🗑️ 刪除此整筆工單", key=f"del_btn_{selected_id}"):
                         with st.spinner("正在從 Google 試算表刪除..."):
                             latest_full = load_data()
                             updated_after_del = latest_full[latest_full["id"].apply(clean_id) != str(selected_id)]
                             if save_data(updated_after_del):
                                 st.warning("工單已刪除！")
                                 st.rerun()
-
-                with c2:
-                    st.markdown(f"#### 📸 照片相簿 (共 {len(existing_imgs)} 張)")
-                    if existing_imgs:
-                        img_cols = st.columns(2)
-                        for idx, img_item in enumerate(existing_imgs):
-                            with img_cols[idx % 2]:
-                                st.image(display_stored_image(img_item), caption=f"照片 #{idx+1}", use_container_width=True)
-                    else:
-                        st.caption("尚未上傳照片")

@@ -46,9 +46,9 @@ def load_data():
         for col in COLUMNS:
             if col not in df.columns:
                 df[col] = ""
-        # 排除說明列與空列
+        # 排除殘留的無效說明列
         df = df[df["part_no"].astype(str).str.strip() != ""].copy()
-        df = df[~df["part_no"].astype(str).str.strip().isin(["id", "part_no", "料號", "part_name", "品名", "vendor", "process"])].copy()
+        df = df[~df["part_no"].astype(str).str.strip().isin(["id", "part_no", "料號", "qty", "status", "due_date", "gdrive_link", "image_path", "notes"])].copy()
         df["id"] = df["id"].apply(clean_id)
         df["due_date"] = df["due_date"].apply(clean_date_str)
         return df[COLUMNS].fillna("")
@@ -78,20 +78,19 @@ def save_data(df):
         st.error(f"寫入 Google 試算表失敗: {e}")
         return False
 
-# 強化版手機照片壓縮（自動轉正 + 縮圖防爆）
+# 智慧極致壓縮（長寬 450px，確保 3 張照片總和不超過試算表儲存格限制）
 def encode_image_to_b64(file_obj):
     try:
         img = Image.open(file_obj)
         img = ImageOps.exif_transpose(img)
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
-        img.thumbnail((500, 500))
+        img.thumbnail((450, 450))
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=50, optimize=True)
+        img.save(buf, format="JPEG", quality=45, optimize=True)
         b64_str = base64.b64encode(buf.getvalue()).decode("utf-8")
         return f"data:image/jpeg;base64,{b64_str}"
-    except Exception as e:
-        st.warning(f"照片處理略過: {e}")
+    except Exception:
         return ""
 
 def parse_images(img_str):
@@ -138,7 +137,7 @@ full_df = load_data()
 
 if menu == "➕ 新增委外工單":
     st.subheader("建立新委外加工單")
-    st.caption("☁️ 工單直接同步至 Google 雲端試算表，照片即時保存。")
+    st.caption("☁️ 工單直接同步至 Google 雲端試算表。")
 
     hist_pnos = get_history_options(full_df, "part_no")
     hist_pnames = get_history_options(full_df, "part_name")
@@ -179,7 +178,7 @@ if menu == "➕ 新增委外工單":
     st.markdown("---")
     st.write("📎 **上傳圖面與照片**")
     gdrive_link = st.text_input("🔗 Google 雲端硬碟圖檔連結 (可直接貼 DWG 檔案或大型圖面網址)", key=f"gd_{rk}")
-    img_files = st.file_uploader("📸 拍照或上傳照片 (支援多張 JPG/PNG，單筆建議 3 張內)", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key=f"img_{rk}")
+    img_files = st.file_uploader("📸 拍照或上傳照片 (支援多張 JPG/PNG，單筆上限 3 張)", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key=f"img_{rk}")
 
     if st.button("💾 儲存建立工單", type="primary", use_container_width=True):
         if not part_no.strip() or not vendor.strip() or not process.strip():
@@ -310,10 +309,10 @@ elif menu == "📋 工單看板與修改":
                             new_gdrive = st.text_input("修改 Google 雲端連結", value=gdrive_val)
 
                         new_notes = st.text_area("修改備註", value=notes_val)
-                        new_img_files = st.file_uploader("追加上傳新照片 (JPG/PNG，最多可存 3 張)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+                        new_img_files = st.file_uploader("追加上傳新照片 (JPG/PNG，總數上限 3 張)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
                         if st.form_submit_button("💾 儲存修改至 Google 雲端", type="primary"):
-                            with st.spinner("正在更新 Google 試算表..."):
+                            with st.spinner("正在壓縮並更新 Google 試算表..."):
                                 latest_full = load_data()
                                 if new_img_files:
                                     newly_encoded = [encode_image_to_b64(f) for f in new_img_files]

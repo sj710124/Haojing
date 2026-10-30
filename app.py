@@ -49,6 +49,11 @@ def load_data():
         # 排除殘留的無效說明列
         df = df[df["part_no"].astype(str).str.strip() != ""].copy()
         df = df[~df["part_no"].astype(str).str.strip().isin(["id", "part_no", "料號", "qty", "status", "due_date", "gdrive_link", "image_path", "notes"])].copy()
+        
+        # 強制將所有欄位轉為純字串，避免型別衝突造成 LossySetitemError
+        for col in COLUMNS:
+            df[col] = df[col].astype(str)
+
         df["id"] = df["id"].apply(clean_id)
         df["due_date"] = df["due_date"].apply(clean_date_str)
         return df[COLUMNS].fillna("")
@@ -62,8 +67,9 @@ def save_data(df):
         return False
     try:
         df_clean = df[COLUMNS].copy().fillna("")
+        for col in COLUMNS:
+            df_clean[col] = df_clean[col].astype(str)
         df_clean["id"] = df_clean["id"].apply(clean_id)
-        df_clean["qty"] = df_clean["qty"].astype(str)
         df_clean["due_date"] = df_clean["due_date"].apply(clean_date_str)
         
         all_data = [COLUMNS] + df_clean.values.tolist()
@@ -78,7 +84,7 @@ def save_data(df):
         st.error(f"寫入 Google 試算表失敗: {e}")
         return False
 
-# 智慧極致壓縮（長寬 450px，確保 3 張照片總和不超過試算表儲存格限制）
+# 智慧壓縮（450px，確保 3 張照片能在儲存格上限內完整保存）
 def encode_image_to_b64(file_obj):
     try:
         img = Image.open(file_obj)
@@ -202,16 +208,16 @@ if menu == "➕ 新增委外工單":
 
                 new_row = {
                     "id": str(new_id_num),
-                    "part_no": part_no.strip(),
-                    "part_name": part_name.strip(),
-                    "vendor": vendor.strip(),
-                    "process": process.strip(),
+                    "part_no": str(part_no).strip(),
+                    "part_name": str(part_name).strip(),
+                    "vendor": str(vendor).strip(),
+                    "process": str(process).strip(),
                     "qty": str(qty),
-                    "status": status,
+                    "status": str(status),
                     "due_date": str(order_date),
-                    "gdrive_link": gdrive_link.strip(),
-                    "image_path": img_data_str,
-                    "notes": notes.strip()
+                    "gdrive_link": str(gdrive_link).strip(),
+                    "image_path": str(img_data_str),
+                    "notes": str(notes).strip()
                 }
                 updated_df = pd.concat([current_full, pd.DataFrame([new_row])], ignore_index=True)
                 if save_data(updated_df):
@@ -323,16 +329,18 @@ elif menu == "📋 工單看板與修改":
                                 target_idx = latest_full[latest_full["id"].apply(clean_id) == str(selected_id)].index
                                 if not target_idx.empty:
                                     row_idx = target_idx[0]
-                                    latest_full.at[row_idx, "part_no"] = new_pno.strip()
-                                    latest_full.at[row_idx, "part_name"] = new_pname.strip()
-                                    latest_full.at[row_idx, "vendor"] = new_vendor.strip()
-                                    latest_full.at[row_idx, "process"] = new_proc.strip()
-                                    latest_full.at[row_idx, "qty"] = str(new_qty)
-                                    latest_full.at[row_idx, "status"] = new_stat
-                                    latest_full.at[row_idx, "due_date"] = str(new_order_date)
-                                    latest_full.at[row_idx, "gdrive_link"] = new_gdrive.strip()
-                                    latest_full.at[row_idx, "image_path"] = "|".join(final_imgs)
-                                    latest_full.at[row_idx, "notes"] = new_notes.strip()
+                                    # 確保全表都是 object 型態，徹底杜絕 LossySetitemError
+                                    latest_full = latest_full.astype(str)
+                                    latest_full.loc[row_idx, "part_no"] = str(new_pno).strip()
+                                    latest_full.loc[row_idx, "part_name"] = str(new_pname).strip()
+                                    latest_full.loc[row_idx, "vendor"] = str(new_vendor).strip()
+                                    latest_full.loc[row_idx, "process"] = str(new_proc).strip()
+                                    latest_full.loc[row_idx, "qty"] = str(new_qty)
+                                    latest_full.loc[row_idx, "status"] = str(new_stat)
+                                    latest_full.loc[row_idx, "due_date"] = str(new_order_date)
+                                    latest_full.loc[row_idx, "gdrive_link"] = str(new_gdrive).strip()
+                                    latest_full.loc[row_idx, "image_path"] = str("|".join(final_imgs))
+                                    latest_full.loc[row_idx, "notes"] = str(new_notes).strip()
 
                                     if save_data(latest_full):
                                         st.success("✅ Google 雲端資料已同步更新！")
